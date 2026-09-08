@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "MQ Worksheet Logger v2",
+  "version": "2.0.0",
+  "description": "Log machine qualification actions (Confirm BIOS, Confirm Boot Order, Retry, Cancel, etc.) on api.fdcservers.io and view them in the popup for end-of-shift export. Auto-fill into hashroot daily worksheet.",
+  "permissions": ["storage", "tabs"],
+  "content_scripts": [
+    {
+      "matches": ["https://api.fdcservers.io/admin/qualification/machinequalification/*/change*"],
+      "js": ["collect.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://one.hashroot.com/employee/worksheet*"],
+      "js": ["hashroot.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "MQ Worksheet Logger",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  }
+}
