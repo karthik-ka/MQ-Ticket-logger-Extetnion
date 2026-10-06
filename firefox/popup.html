@@ -25,11 +25,11 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{
-  width:580px;max-height:580px;overflow:hidden;
-  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-  font-size:12px;line-height:1.45;color:var(--text);background:var(--bg);
-  display:flex;flex-direction:column;
-}
+    width:580px;min-height:260px;max-height:580px;overflow:hidden;
+    font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    font-size:12px;line-height:1.45;color:var(--text);background:var(--bg);
+    display:flex;flex-direction:column;
+  }
 html,body{scrollbar-width:none;-ms-overflow-style:none;overflow-x:hidden}
 html::-webkit-scrollbar,body::-webkit-scrollbar{display:none;width:0}
 
@@ -49,7 +49,7 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{display:none;width:0}
 .content{flex:1;display:flex;flex-direction:column;overflow:hidden}
 
 /* Panel */
-.pnl{background:var(--surface);margin:0 8px 8px;border:1px solid var(--border);border-radius:var(--r);flex:1;overflow-y:auto;display:flex;flex-direction:column}
+.pnl{background:var(--surface);margin:0 8px 8px;border:1px solid var(--border);border-radius:var(--r);flex:1;overflow-y:auto;overflow-x:visible;display:flex;flex-direction:column}
 .pnl[hidden]{display:none}
 .pnl::-webkit-scrollbar{width:3px}
 .pnl::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
@@ -73,7 +73,10 @@ table.et tbody>tr.main-row:hover td{background:var(--surface2)}
 table.et tbody>tr.main-row.expanded td{background:var(--surface3);border-bottom-color:transparent}
 
 /* Column widths — 7 columns = 100% (ACTIONS hidden temporarily) */
-.mc{width:10%}.md{width:10%}.mw{width:21%}.mp{width:20%}.ms{width:18%}.me{width:9%;text-align:center}.mx{width:12%;text-align:center}
+/* Ticket ID (.mw) trimmed 21%->18% and the space handed to Phase (.mp) 20%->23%:
+   pulls the Ticket ID / Phase boundary ~17px left (tighter gap) while giving
+   Phase more room so "Detect Hardware" / "Health Check" stay on one line. */
+.mc{width:10%}.md{width:10%}.mw{width:18%}.mp{width:23%}.ms{width:18%}.me{width:9%;text-align:center}.mx{width:12%;text-align:center}
 
 /* Expand icon */
 .exp-ico{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:var(--rs);color:var(--text3);transition:all .15s;font-size:10px}
@@ -81,17 +84,21 @@ table.et tbody>tr.main-row.expanded td{background:var(--surface3);border-bottom-
 tr.main-row:hover .exp-ico{color:var(--pri);background:var(--pri-dim)}
 tr.main-row.expanded .exp-ico{color:var(--pri);transform:rotate(180deg)}
 
-/* Delete icon in main row */
-.del-ico{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:none;background:transparent;border-radius:var(--rs);color:var(--text3);cursor:pointer;transition:all .12s;padding:0;margin-right:2px}
+/* Delete icon in main row — margin-right is the gap to the expand arrow in .mx */
+.del-ico{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:none;background:transparent;border-radius:var(--rs);color:var(--text3);cursor:pointer;transition:all .12s;padding:0;margin-right:7px}
 .del-ico svg{pointer-events:none}
 .del-ico:hover{color:var(--dng);background:var(--dng-dim)}
 
 /* Detail row */
 tr.detail-row{display:none}
 tr.detail-row.open{display:table-row}
-tr.detail-row td{background:var(--surface3);border-bottom:1px solid var(--border);padding:8px 10px}
-.det-inner{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}
-.det-full{grid-column:1/-1}
+/* Detail row */
+tr.detail-row{display:none}
+tr.detail-row.open{display:table-row}
+tr.detail-row td{background:var(--surface3);border-bottom:1px solid var(--border);padding:7px 9px}
+.det-inner{display:grid;grid-template-columns:1fr 1fr 1.5fr;column-gap:6px;row-gap:6px;align-items:start}
+.det-inner .btn{height:22px;padding:0 8px}
+.det-full{grid-column:1/-1;margin-top:0}
 .det-label{font-size:9px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.03em;margin-bottom:3px}
 
 /* Links */
@@ -109,13 +116,13 @@ a:hover{text-decoration:underline}
 }
 .dd-cur::after{content:'';position:absolute;right:5px;top:50%;border:3px solid transparent;border-top-color:var(--text3);margin-top:-1px;pointer-events:none}
 .dd-cur:hover{border-color:var(--pri)}
-.dd-list{
-  display:none;position:absolute;left:0;min-width:100%;top:100%;
-  margin-top:1px;background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--rs);z-index:999;max-height:130px;overflow-y:auto;
-  box-shadow:0 4px 12px rgba(0,0,0,.35);
-  scrollbar-width:none;-ms-overflow-style:none;
-}
+  .dd-list{
+    display:none;position:absolute;left:0;min-width:100%;top:100%;
+    margin-top:1px;background:var(--surface);border:1px solid var(--border);
+    border-radius:var(--rs);z-index:999;max-height:180px;overflow-y:auto;
+    box-shadow:0 4px 12px rgba(0,0,0,.35);
+    scrollbar-width:none;-ms-overflow-style:none;
+  }
 .dd-list::-webkit-scrollbar{display:none;width:0}
 .dd.open .dd-list{display:block}
 .dd.up .dd-list{top:auto;bottom:100%;margin-top:0;margin-bottom:1px}
@@ -195,7 +202,7 @@ label input::placeholder{color:var(--text3)}
 <body>
   <div class="hdr">
     <div class="hdr-l">
-      <h1>MQ Logger <span>v2</span></h1>
+      <h1>MQ Logger</h1>
       <span id="count" class="cnt"></span>
     </div>
     <div class="hdr-r">

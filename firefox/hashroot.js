@@ -93,6 +93,55 @@
     return null;
   }
 
+  // --- Option matching ---
+  //
+  // Stored MQ values are written without separators ("InProgress"), while the
+  // Hashroot option labels are written with them ("In Progress"). Comparing the
+  // raw lowercased strings made the exact AND partial tests both fail for that
+  // pair, and the old code then silently selected the first option in the list
+  // (Pending). normKey() collapses case and separators so the stored value and
+  // the visible label compare equal, whichever side the space is on.
+
+  function normKey(s) {
+    return String(s == null ? '' : s).toLowerCase().replace(/[\s_\-./]+/g, '');
+  }
+
+  function optionLabel(el) {
+    return el.textContent.replace(/\s+/g, ' ').trim();
+  }
+
+  function optionLabels(options) {
+    var out = [];
+    for (var i = 0; i < options.length; i++) out.push(optionLabel(options[i]));
+    return out;
+  }
+
+  // Returns the matching option element, or null when nothing matches.
+  function matchOption(options, value) {
+    var target = normKey(value);
+    if (!target) return null;
+    var i, k;
+
+    // 1. Exact match, separator/case insensitive
+    for (i = 0; i < options.length; i++) {
+      if (normKey(optionLabel(options[i])) === target) {
+        log('Exact match:', optionLabel(options[i]));
+        return options[i];
+      }
+    }
+
+    // 2. Partial match, separator/case insensitive
+    for (i = 0; i < options.length; i++) {
+      k = normKey(optionLabel(options[i]));
+      if (k && (k.indexOf(target) !== -1 || target.indexOf(k) !== -1)) {
+        log('Partial match:', optionLabel(options[i]));
+        return options[i];
+      }
+    }
+
+    return null;
+  }
+
   // --- React-select interaction (robust) ---
 
   function selectReactOption(container, value) {
@@ -159,39 +208,29 @@
           return;
         }
 
-        log('Found', options.length, 'options');
-        var matched = null;
-        var v = value.toLowerCase();
+        log('Found', options.length, 'options:', optionLabels(options).join(' | '));
 
-        // 1. Exact match
-        for (var i = 0; i < options.length; i++) {
-          var t = options[i].textContent.replace(/\s+/g, ' ').trim();
-          if (t.toLowerCase() === v) { matched = options[i]; log('Exact match:', t); break; }
-        }
-        // 2. Partial match
-        if (!matched) {
-          for (var i = 0; i < options.length; i++) {
-            var t = options[i].textContent.replace(/\s+/g, ' ').trim();
-            if (t.toLowerCase().indexOf(v) !== -1 || v.indexOf(t.toLowerCase()) !== -1) {
-              matched = options[i]; log('Partial match:', t); break;
-            }
-          }
-        }
-        // 3. Fallback to first option
-        if (!matched && options.length) {
+        var matched = matchOption(options, value);
+
+        // Only auto-accept when there is genuinely no choice to make.
+        if (!matched && options.length === 1) {
           matched = options[0];
-          log('Fallback to first option:', matched.textContent.trim());
+          log('Single option — using it:', optionLabel(matched));
         }
 
-        if (matched) {
-          // Use mousedown + click for react-select option selection
-          matched.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-          matched.click();
-          log('Selected:', matched.textContent.trim());
-          resolve(true);
-        } else {
+        if (!matched) {
+          // Never guess: picking an arbitrary option is what wrote Pending into
+          // the worksheet for In Progress entries.
+          log('NO MATCH for "' + value + '" — leaving field untouched');
           resolve(false);
+          return;
         }
+
+        // Use mousedown + click for react-select option selection
+        matched.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        matched.click();
+        log('Selected:', optionLabel(matched));
+        resolve(true);
       }
 
       setTimeout(pollOptions, 500);
@@ -416,7 +455,7 @@
   }
 
   function showIdleButton() {
-    createButton('Fill Hashroot', '#16a34a', startFill);
+    createButton('AutoFill entries from MQ Logger', '#16a34a', startFill);
     log('Idle button shown');
   }
 

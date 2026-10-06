@@ -167,8 +167,10 @@
       var scLabel = e.result === 'pass' ? '\u2713 Yes' : e.result === 'fail' ? '\u2717 No' : '\u2014';
       rows += '<div><div class="det-label">Success Criteria Met</div><button class="btn' + scClass + '" data-a="result" style="width:100%">' + scLabel + '</button></div>';
 
-      /* ESC Flag Marked (renamed from Flag) */
-      rows += '<div><div class="det-label">ESC Flag Marked</div><input type="checkbox" class="fk" data-a="flag"' + (e.flagMarked ? ' checked' : '') + '></div>';
+      /* ESC FLAG MARKED (matches Success Criteria style) */
+      var flClass = e.flagMarked === true ? ' sp' : (e.flagMarked === false ? ' sf' : ' sn');
+      var flLabel = e.flagMarked === true ? '✓ Yes' : (e.flagMarked === false ? '✗ No' : '\u2014');
+      rows += '<div><div class="det-label">ESC Flag Marked</div><button class="btn' + flClass + '" data-a="flag" style="width:100%">' + flLabel + '</button></div>';
 
       /* Escalated To */
       rows += '<div><div class="det-label">Escalated To</div>' + ddHtml(e.escalatedTo || '', EOPTS, 'escalatedTo') + '</div>';
@@ -262,18 +264,18 @@
       }
     }
 
-    if (a === 'del') {
-      var tr = ev.target.closest('tr');
-      if (tr) {
-        var id = tr.getAttribute('data-id');
-        if (id && confirm('Delete this entry?'))
-          getEntries().then(function (es) {
-            delete expanded[id];
-            saveEntries(es.filter(function (e) { return e.id !== id; })).then(function () { load(); });
-          });
-      }
-      return;
-    }
+            if (a === 'del') {
+              var tr = ev.target.closest('tr');
+              if (tr) {
+                var id = tr.getAttribute('data-id');
+                if (id)
+                  getEntries().then(function (es) {
+                    delete expanded[id];
+                    saveEntries(es.filter(function (e) { return e.id !== id; })).then(function () { load(); });
+                  });
+              }
+              return;
+            }
 
     if (a === 'esc' || a === 'result' || a === 'flag') {
       var tr = ev.target.closest('tr');
@@ -288,7 +290,14 @@
             } else if (a === 'result') {
               e.result = !e.result ? 'pass' : e.result === 'pass' ? 'fail' : null;
             } else if (a === 'flag') {
-              e.flagMarked = ev.target.checked;
+              // Toggle: null/undefined/false -> true -> false -> null
+              if (e.flagMarked === true) {
+                e.flagMarked = false;
+              } else if (e.flagMarked === false) {
+                e.flagMarked = null;
+              } else {
+                e.flagMarked = true;
+              }
             }
             saveEntries(es).then(function () { render(es); });
           });
@@ -348,7 +357,6 @@
     });
   });
   document.getElementById('clearBtn').addEventListener('click', function () {
-    if (!confirm('Clear ALL entries?')) return;
     saveEntries([]).then(function () { expanded = {}; render([]); });
   });
 
