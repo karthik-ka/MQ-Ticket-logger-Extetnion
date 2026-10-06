@@ -56,7 +56,27 @@
   /* Storage */
   function sGet(k) { return new Promise(function (r) { chrome.storage.local.get(k, r); }); }
   function sSet(o) { return new Promise(function (r) { chrome.storage.local.set(o, r); }); }
-  function getEntries() { return sGet(SK).then(function (r) { return Array.isArray(r[SK]) ? r[SK] : []; }); }
+  function getEntries() {
+    return sGet(SK).then(function (r) {
+      var es = Array.isArray(r[SK]) ? r[SK] : [];
+      var changed = false;
+      for (var i = 0; i < es.length; i++) {
+        var e = es[i];
+        if (!e) continue;
+        var v = e.phase == null ? '' : String(e.phase).replace(/\s+/g, ' ').trim();
+        if (!v || v === '-' || v === '\u2014') {
+          e.phase = 'pending';
+          changed = true;
+        }
+      }
+      if (changed) {
+        var p = {};
+        p[SK] = es;
+        return sSet(p).then(function () { return es; });
+      }
+      return es;
+    });
+  }
   function saveEntries(e) { var p = {}; p[SK] = e; return sSet(p); }
   function findEntry(a, id) { for (var i = 0; i < a.length; i++) if (a[i].id === id) return a[i]; return null; }
   function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }

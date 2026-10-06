@@ -94,6 +94,13 @@
     };
   }
 
+  function normalizePhase(p) {
+    var v = String(p == null ? '' : p).replace(/\s+/g, ' ').trim();
+    if (!v) return 'pending';
+    if (v === '-' || v === '—') return 'pending';
+    return v;
+  }
+
   function makeEntry(ctx, actions, open) {
     var now = new Date();
     return {
@@ -106,7 +113,7 @@
       deviceUrl: ctx.deviceUrl,
       whmcsTicket: ctx.whmcsTicket,
       status: ctx.status,
-      phase: ctx.phase,
+      phase: normalizePhase(ctx.phase),
       actions: actions,
       open: !!open
     };

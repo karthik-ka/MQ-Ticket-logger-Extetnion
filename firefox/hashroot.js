@@ -16,10 +16,16 @@
     console.log.apply(console, args);
   }
 
-  var api = typeof browser !== 'undefined' ? browser : chrome;
-
   function storageGet(keys) {
-    return api.storage.local.get(keys);
+    return new Promise(function (resolve, reject) {
+      try {
+        chrome.storage.local.get(keys, function (result) {
+          var err = chrome.runtime && chrome.runtime.lastError;
+          if (err) { log('storage.get error:', err.message); reject(err); }
+          else resolve(result);
+        });
+      } catch (e) { log('storage.get exception:', e.message); reject(e); }
+    });
   }
 
   function delay(ms) {
@@ -317,7 +323,9 @@
     return waitWhilePaused().then(function () {
       var container = findLabelContainer('Phase');
       if (container && entry.phase) {
-        var phaseVal = entry.phase === 'Health Check' ? 'HHR' : entry.phase;
+        var p = String(entry.phase).replace(/\s+/g, ' ').trim();
+        if (!p || p === '-' || p === '—') p = 'pending';
+        var phaseVal = p === 'Health Check' ? 'HHR' : p;
         return selectReactOption(container, phaseVal);
       }
       log('Phase container or value not found');

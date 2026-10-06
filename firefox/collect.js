@@ -12,6 +12,12 @@
   var QUAL_RE = /\/admin\/qualification\/machinequalification\/(\d+)\/change\//;
 
   // Actions that must never produce an mqEntries record.
+  //
+  // collect.js has no API/event payload to inspect — it only ever sees the label
+  // of the <a class="button"> that was clicked inside the Actions field-row.
+  // That label is therefore the reliable discriminator, and it is matched by
+  // exact equality against this small list rather than by substring, so no other
+  // qualification action can be caught by accident.
   var NO_LOG_ACTIONS = ['force fail', 'force-fail', 'forcefail', 'force failure'];
 
   function isNoLogAction(action) {
@@ -27,14 +33,17 @@
     console.log.apply(console, args);
   }
 
-  var api = typeof browser !== 'undefined' ? browser : chrome;
-
   function storageGet(keys) {
-    return api.storage.local.get(keys);
+    return new Promise(function (resolve) { chrome.storage.local.get(keys, resolve); });
   }
 
   function storageSet(obj) {
-    return api.storage.local.set(obj);
+    return new Promise(function (resolve, reject) {
+      chrome.storage.local.set(obj, function () {
+        var err = chrome.runtime.lastError;
+        err ? reject(new Error(err.message)) : resolve();
+      });
+    });
   }
 
   // Scrape the General fieldset: label -> { text, href }
@@ -85,6 +94,13 @@
     };
   }
 
+  function normalizePhase(p) {
+    var v = String(p == null ? '' : p).replace(/\s+/g, ' ').trim();
+    if (!v) return 'pending';
+    if (v === '-' || v === '—') return 'pending';
+    return v;
+  }
+
   function makeEntry(ctx, actions, open) {
     var now = new Date();
     return {
@@ -97,7 +113,7 @@
       deviceUrl: ctx.deviceUrl,
       whmcsTicket: ctx.whmcsTicket,
       status: ctx.status,
-      phase: ctx.phase,
+      phase: normalizePhase(ctx.phase),
       actions: actions,
       open: !!open
     };
@@ -187,6 +203,8 @@
       return;
     }
 
+    // Force Fail must not create a record. Navigation still proceeds exactly as
+    // it would have, so no FDC behaviour is altered.
     if (isNoLogAction(action)) {
       log('skipping entry for action:', action);
       window.location.assign(href || location.href);

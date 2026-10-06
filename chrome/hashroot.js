@@ -323,7 +323,9 @@
     return waitWhilePaused().then(function () {
       var container = findLabelContainer('Phase');
       if (container && entry.phase) {
-        var phaseVal = entry.phase === 'Health Check' ? 'HHR' : entry.phase;
+        var p = String(entry.phase).replace(/\s+/g, ' ').trim();
+        if (!p || p === '-' || p === '—') p = 'pending';
+        var phaseVal = p === 'Health Check' ? 'HHR' : p;
         return selectReactOption(container, phaseVal);
       }
       log('Phase container or value not found');
