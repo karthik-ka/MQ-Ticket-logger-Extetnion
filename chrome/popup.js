@@ -19,6 +19,7 @@
   var backBtn = document.getElementById('backBtn');
   var pE = document.getElementById('panel-entries');
   var pA = document.getElementById('panel-add');
+  var pB = document.getElementById('panel-bulk');
 
   var expanded = {};
   var SUN = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13"/></svg>';
@@ -43,14 +44,21 @@
   function showView(view) {
     if (view === 'add') {
       pE.hidden = true;
+      pB.hidden = true;
       pA.hidden = false;
+    } else if (view === 'bulk') {
+      pE.hidden = true;
+      pA.hidden = true;
+      pB.hidden = false;
     } else {
       pA.hidden = true;
+      pB.hidden = true;
       pE.hidden = false;
       load();
     }
   }
   addEntryBtn.addEventListener('click', function () { showView('add'); });
+  document.getElementById('bulkBtn').addEventListener('click', function () { showView('bulk'); });
   backBtn.addEventListener('click', function () { showView('entries'); });
 
   /* Storage */
@@ -124,12 +132,13 @@
     return '';
   }
 
-  function ddHtml(cur, opts, field) {
+  function ddHtml(cur, opts, field, displayText) {
     var isStatus = field === 'statusOverride';
-    var cls = isStatus ? statusCls(cur) : '';
+    var label = displayText || cur || '--';
+    var cls = isStatus ? statusCls(cur || label) : '';
     var stAttr = cls ? ' data-st="' + cls + '"' : '';
     var h = '<div class="dd" data-field="' + field + '" data-val="' + esc(cur || '') + '">';
-    h += '<div class="dd-cur"' + stAttr + '>' + esc(cur || '--') + '</div>';
+    h += '<div class="dd-cur"' + stAttr + '>' + esc(label) + '</div>';
     h += '<div class="dd-list">';
     for (var i = 0; i < opts.length; i++) {
       var itemCls = isStatus ? statusCls(opts[i].v) : '';
@@ -172,7 +181,7 @@
       rows += '<td class="md">' + dLink + '</td>';
       rows += '<td class="mw">' + esc(e.whmcsTicket || '-') + '</td>';
       rows += '<td class="mp">' + esc(e.phase || '-') + '</td>';
-      rows += '<td class="ms">' + ddHtml(e.statusOverride || '', SOPTS, 'statusOverride') + '</td>';
+      rows += '<td class="ms">' + ddHtml(e.statusOverride || '', SOPTS, 'statusOverride', e.statusOverride || e.status || '') + '</td>';
       rows += '<td class="me"><button class="btn' + escClass + '" data-a="esc">' + escLabel + '</button></td>';
       rows += '<td class="mx"><button class="del-ico" data-a="del" title="Delete">' + TRASH + '</button><span class="exp-ico">' + CHEV + '</span></td>';
       rows += '</tr>';
@@ -389,7 +398,7 @@
   /* Manual add */
   document.getElementById('addBtn').addEventListener('click', function () {
     var devId = fD.value.trim();
-    var acts = fA.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    var acts = fA.value.split(/[,&]/).map(function (s) { return s.trim(); }).filter(Boolean);
     if (!devId) { showFS('Device ID required.', true); return; }
     if (!acts.length) { showFS('Actions required.', true); return; }
     var ts = Date.now();
@@ -432,13 +441,534 @@
     if (s.whmcs != null) fW.value = s.whmcs;
     if (s.status) fS.value = s.status;
     if (s.phase) fP.value = s.phase;
-    if (s.actions != null) fA.value = s.actions;
+    if (s.actions != null) {
+      fA.value = s.actions;
+      if (fA.selectedIndex < 0) fA.selectedIndex = 0;
+    }
   }
-  [fQ, fD, fW, fA].forEach(function (el) { el.addEventListener('input', saveF); });
-  [fS, fP].forEach(function (el) { el.addEventListener('change', saveF); });
+  [fQ, fD, fW].forEach(function (el) { el.addEventListener('input', saveF); });
+  [fS, fP, fA].forEach(function (el) { el.addEventListener('change', saveF); });
   document.getElementById('clearFieldsBtn').addEventListener('click', function () { clrForm(true); });
   fS.value = fS.options[0].value;
   fP.value = fP.options[0].value;
+
+  /* Bulk import — paste box, preview, validated import. Pure parsers have no
+     DOM dependencies so they can be statically tested; storage uses the same
+     getEntries/saveEntries/render path as Add Entry. */
+  var bText = document.getElementById('b-text');
+  var bErr = document.getElementById('b-err');
+  var bSummary = document.getElementById('b-summary');
+  var bPreview = document.getElementById('b-preview');
+  var bImportBtn = document.getElementById('b-import');
+  var bStatus = document.getElementById('b-status');
+  var bSkipDup = document.getElementById('b-skipdup');
+  var bParsed = [];
+
+  function biStripMd(s) {
+    return String(s == null ? '' : s).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function biIsBlank(s) {
+    var v = biStripMd(s);
+    return !v || v === '-' || v === '\u2014' || v.toLowerCase() === 'n/a';
+  }
+  function biNorm(s) { return String(s == null ? '' : s).toLowerCase().replace(/[\s_\-./]+/g, ''); }
+
+  var BI_PHASES = ['pending', 'detect hardware', 'disk wipe', 'health check', 'hhr'];
+  var BI_KNOWN_STATUS = ['pending', 'inprogress', 'completed', 'escalated', 'failed to start', 'failed', 'awaiting rerun', 'no disks', 'blocked'];
+  var BI_KNOWN_STATUS_N = BI_KNOWN_STATUS.map(biNorm);
+  var BI_KNOWN_ESCTO = ['no escalation', 'midhun', 'shift manager', 'onsite'];
+
+  function biParseEsc(v) {
+    if (v == null) return null;
+    var k = biNorm(v);
+    if (!k || k === 'na') return null;
+    if (k === 'yes' || k === 'y') return 'yes';
+    if (k === 'no' || k === 'n' || k === 'noescalation') return 'no';
+    return undefined;
+  }
+  function biParseSuccess(v) {
+    if (v == null) return null;
+    var k = biNorm(v);
+    if (!k || k === 'na') return null;
+    if (k === 'yes' || k === 'y' || k === '\u2713yes' || k === 'pass') return 'pass';
+    if (k === 'no' || k === 'n' || k === '\u2717no' || k === 'fail') return 'fail';
+    return undefined;
+  }
+  function biParseFlag(v) {
+    if (v == null) return undefined;
+    var k = biNorm(v);
+    if (!k || k === 'na') return undefined;
+    if (k === 'yes' || k === 'y' || k === '\u2713yes') return true;
+    if (k === 'no' || k === 'n' || k === '\u2717no') return false;
+    return undefined;
+  }
+  function biParseTime(v) {
+    if (v == null || biIsBlank(v)) return { ts: null, warn: null };
+    var s = biStripMd(v);
+    var d = new Date(s.replace(' ', 'T'));
+    if (!isNaN(d.getTime())) return { ts: d.getTime(), warn: null };
+    var m = s.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
+    if (m) {
+      d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]));
+      if (!isNaN(d.getTime())) return { ts: d.getTime(), warn: null };
+    }
+    return { ts: null, warn: 'Unparseable Time "' + s + '" — entry will use import time' };
+  }
+
+  /* Format B: label-based full records. Next "Qual ID:" starts a new record. */
+  function biField(chunk, name) {
+    var m = chunk.match(new RegExp('^\\s*' + name + '\\s*:(.*)$', 'im'));
+    return m ? biStripMd(m[1]) : null;
+  }
+  /* Note may span several lines: consume continuation lines until the next
+     known field label or the end of the record chunk. */
+  var BI_FULL_LABELS = ['Qual ID', 'Device ID', 'Ticket ID', 'Current phase', 'Current Status', 'Status', 'Escalation Required', 'Actions', 'Time', 'Success Criteria Met', 'ESC Flag Marked', 'Escalated To', 'Note'];
+  function biIsFullLabel(l) {
+    for (var k = 0; k < BI_FULL_LABELS.length; k++) {
+      if (new RegExp('^\\s*' + BI_FULL_LABELS[k] + '\\s*:', 'i').test(l)) return true;
+    }
+    return false;
+  }
+  function biNoteField(chunk) {
+    var lines = String(chunk).split(/\r?\n/);
+    var start = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (/^\s*Note\s*:/i.test(lines[i])) { start = i; break; }
+    }
+    if (start < 0) return null;
+    var vals = [biStripMd(lines[start].replace(/^\s*Note\s*:/i, ''))];
+    for (var j = start + 1; j < lines.length; j++) {
+      if (biIsFullLabel(lines[j])) break;
+      vals.push(String(lines[j]).replace(/\*/g, '').replace(/\s+/g, ' ').trim());
+    }
+    while (vals.length && vals[0] === '') vals.shift();
+    while (vals.length && vals[vals.length - 1] === '') vals.pop();
+    if (!vals.length) return null;
+    return vals.join('\n');
+  }
+  function biIdUrl(raw) {
+    var out = { id: null, url: null };
+    if (raw == null) return out;
+    var um = String(raw).match(/(https?:\/\/[^\s)]+)/);
+    if (um) out.url = um[1];
+    var nm = String(raw).replace(/https?:\/\/\S+/g, ' ').match(/\d+/);
+    if (nm) out.id = nm[0];
+    return out;
+  }
+  function biParseFullChunk(chunk) {
+    var rec = { format: 'B', warnings: [], errors: [] };
+    var q = biIdUrl(biField(chunk, 'Qual ID'));
+    if (!q.id) rec.errors.push('Qual ID number not found');
+    else {
+      rec.qualId = q.id;
+      rec.qualUrl = q.url || (ORIGIN + '/admin/qualification/machinequalification/' + q.id + '/change/');
+    }
+    var dv = biIdUrl(biField(chunk, 'Device ID'));
+    if (!dv.id) rec.errors.push('Device ID number not found');
+    else {
+      rec.deviceId = dv.id;
+      rec.deviceUrl = dv.url || (DDEV + '/backend/devices/' + dv.id + '/summary');
+    }
+    var tick = biField(chunk, 'Ticket ID');
+    rec.whmcsTicket = (tick != null && !biIsBlank(tick)) ? tick : '';
+    if (!rec.whmcsTicket) rec.warnings.push('Ticket ID missing — left blank, not inferred');
+    var ph = biField(chunk, 'Current phase');
+    rec.phase = ph || '';
+    if (!ph) rec.warnings.push('Current phase missing');
+    else if (BI_PHASES.indexOf(ph.toLowerCase()) === -1) rec.warnings.push('Unknown phase "' + ph + '" — kept as-is');
+    var st = biField(chunk, 'Current Status');
+    if (st == null) st = biField(chunk, 'Status');
+    rec.status = st || '';
+    if (!st) rec.warnings.push('Status missing');
+    else if (BI_KNOWN_STATUS_N.indexOf(biNorm(st)) === -1) rec.warnings.push('Unknown status "' + st + '" — kept as-is');
+    var escv = biField(chunk, 'Escalation Required');
+    if (escv == null || biIsBlank(escv)) rec.escalation = null;
+    else {
+      var e = biParseEsc(escv);
+      if (e === undefined) { rec.escalation = null; rec.warnings.push('Unrecognized Escalation Required "' + escv + '" — treated as unknown'); }
+      else rec.escalation = e;
+    }
+    var acts = biField(chunk, 'Actions');
+    rec.actions = (acts != null && !biIsBlank(acts)) ? acts.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+    if (!rec.actions.length) rec.warnings.push('Actions missing — stored empty');
+    var tm = biField(chunk, 'Time');
+    var pt = biParseTime(tm);
+    if (pt.ts) rec.ts = pt.ts;
+    else {
+      if (tm != null && !biIsBlank(tm)) rec.warnings.push('Unparseable Time "' + tm + '" — entry will use import time');
+      else rec.warnings.push('Time missing — entry will use import time');
+    }
+    var sc = biField(chunk, 'Success Criteria Met');
+    if (sc == null || biIsBlank(sc)) rec.result = null;
+    else {
+      var r = biParseSuccess(sc);
+      if (r === undefined) { rec.result = null; rec.warnings.push('Unrecognized Success Criteria "' + sc + '" — treated as N/A'); }
+      else rec.result = r;
+    }
+    var fl = biField(chunk, 'ESC Flag Marked');
+    if (fl != null && !biIsBlank(fl)) {
+      var f = biParseFlag(fl);
+      if (f === undefined) rec.warnings.push('Unrecognized ESC Flag Marked "' + fl + '" — left unset');
+      else rec.flagMarked = f;
+    }
+    var et = biField(chunk, 'Escalated To');
+    if (et != null && !biIsBlank(et)) {
+      rec.escalatedTo = et;
+      if (BI_KNOWN_ESCTO.indexOf(et.toLowerCase()) === -1) rec.warnings.push('Unknown Escalated To "' + et + '" — kept as-is');
+    }
+    var note = biNoteField(chunk);
+    if (note != null && !biIsBlank(note)) rec.note = note;
+    return rec;
+  }
+  function biParseFull(text) {
+    var idx = [];
+    var re = /qual\s*id\s*:/gi;
+    var m;
+    while ((m = re.exec(text)) !== null) idx.push(m.index);
+    if (!idx.length) return [];
+    var out = [];
+    for (var i = 0; i < idx.length; i++) {
+      out.push(biParseFullChunk(text.slice(idx[i], i + 1 < idx.length ? idx[i + 1] : text.length)));
+    }
+    return out;
+  }
+
+  /* Format A: numbered compact rows. A seq line is a short number followed by a
+     numeric ID line and a phase line — IDs alone never qualify as seq numbers.
+     Newer rows may carry a leading Ticket ID line (#12345) between the seq
+     number and the Device ID; the note runs from after the flag/escalated-to
+     fields to the final Success line and may span several lines. */
+  function biNextNonBlank(lines, i) {
+    var nxt = [];
+    for (var j = i + 1; j < lines.length && nxt.length < 3; j++) {
+      if (lines[j] !== '') nxt.push(lines[j]);
+    }
+    return nxt;
+  }
+  function biIsTicketLine(l) { return /^#\S+$/.test(l); }
+  function biIsSeqAt(lines, i) {
+    if (!/^\d{1,3}$/.test(lines[i])) return false;
+    var nxt = biNextNonBlank(lines, i);
+    if (nxt.length < 2) return true;
+    // seq, device, phase (original rows without a ticket line)
+    if (/^\d+$/.test(nxt[0]) && BI_PHASES.indexOf(nxt[1].toLowerCase()) !== -1) return true;
+    if (nxt.length < 3) return false;
+    // seq, ticket, device, phase
+    if (biIsTicketLine(nxt[0]) && /^\d+$/.test(nxt[1]) && BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return true;
+    // seq, bare-numeric ticket, device, phase
+    if (/^\d+$/.test(nxt[0]) && /^\d+$/.test(nxt[1]) && BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return true;
+    return false;
+  }
+  function biParseCompact(text) {
+    var lines = String(text).split(/\r?\n/).map(function (l) {
+      return String(l).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+    });
+    var seqAt = [];
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i] !== '' && biIsSeqAt(lines, i)) seqAt.push(i);
+    }
+    if (!seqAt.length) return [];
+    var out = [];
+    for (var s = 0; s < seqAt.length; s++) {
+      // Blanks are kept: interior blank lines inside a multiline note survive.
+      var fields = [];
+      var end = s + 1 < seqAt.length ? seqAt[s + 1] : lines.length;
+      for (var j = seqAt[s] + 1; j < end; j++) {
+        fields.push(lines[j]);
+      }
+      out.push(biParseCompactFields(fields));
+    }
+    return out;
+  }
+  function biParseCompactFields(f) {
+    var rec = { format: 'A', warnings: [], errors: [] };
+    rec.warnings.push('Compact row has no Qual ID — numeric value mapped to Device ID only');
+    // Non-blank line index; positional head parsing skips blank separators.
+    var nb = [];
+    for (var k = 0; k < f.length; k++) if (f[k] !== '') nb.push(k);
+    function nth(n) { return n < nb.length ? f[nb[n]] : null; }
+    var pos = 0;
+    var hasTicket = false;
+    // Optional leading Ticket ID: explicit "#12345", or two leading numerics
+    // ahead of a phase line (original rows never have that shape).
+    var v0 = nth(0), v1 = nth(1), v2 = nth(2);
+    if (v0 != null && biIsTicketLine(v0)) {
+      rec.whmcsTicket = v0;
+      pos = 1;
+      hasTicket = true;
+    } else if (v0 != null && /^\d+$/.test(v0) && v1 != null && /^\d+$/.test(v1) &&
+               v2 != null && BI_PHASES.indexOf(v2.toLowerCase()) !== -1) {
+      rec.whmcsTicket = v0;
+      pos = 1;
+      hasTicket = true;
+      rec.warnings.push('First numeric value "' + v0 + '" treated as Ticket ID — verify in preview');
+    } else {
+      rec.whmcsTicket = '';
+      rec.warnings.push('Ticket ID not present in compact row — left blank, not inferred');
+    }
+    var dv = nth(pos);
+    pos++;
+    if (dv == null || !/^\d+$/.test(dv)) {
+      rec.errors.push('Device ID missing or non-numeric' + (dv != null ? ' (found "' + dv + '")' : ''));
+    } else {
+      rec.deviceId = dv;
+      rec.deviceUrl = DDEV + '/backend/devices/' + dv + '/summary';
+    }
+    var ph = nth(pos);
+    pos++;
+    rec.phase = ph || '';
+    if (ph == null) rec.warnings.push('Phase missing');
+    else if (BI_PHASES.indexOf(ph.toLowerCase()) === -1) rec.warnings.push('Unknown phase "' + ph + '" — kept as-is');
+    var st = nth(pos);
+    pos++;
+    rec.status = st || '';
+    if (st == null) rec.warnings.push('Status missing');
+    else if (BI_KNOWN_STATUS_N.indexOf(biNorm(st)) === -1) rec.warnings.push('Unknown status "' + st + '" — kept as-is');
+    var escline = nth(pos);
+    pos++;
+    if (escline != null && !biIsBlank(escline)) {
+      var e = biParseEsc(escline);
+      if (e === undefined) { rec.escalation = null; rec.warnings.push('Unrecognized escalation "' + escline + '" — treated as unknown'); }
+      else rec.escalation = e;
+    } else rec.escalation = null;
+    // Remaining lines. Classic rows (no ticket line) keep the legacy fixed
+    // slots: flag, escalated-to, single-line note, success. Ticket rows use
+    // semantic classification: known escalated-to names and Yes/No flags fill
+    // their slots in any order, the trailing Success line closes the record,
+    // and every other line is note content joined with newlines.
+    var rest = [];
+    for (var n = pos; n < nb.length; n++) rest.push(f[nb[n]]);
+    rec.result = null;
+    if (!hasTicket) {
+      if (rest.length > 0 && !biIsBlank(rest[0])) {
+        var fl0 = biParseFlag(rest[0]);
+        if (fl0 === undefined) rec.warnings.push('Unrecognized flag value "' + rest[0] + '" — left unset');
+        else rec.flagMarked = fl0;
+      }
+      if (rest.length > 1 && !biIsBlank(rest[1])) {
+        rec.escalatedTo = rest[1];
+        if (BI_KNOWN_ESCTO.indexOf(rest[1].toLowerCase()) === -1) rec.warnings.push('Unknown Escalated To "' + rest[1] + '" — kept as-is');
+      }
+      if (rest.length > 2 && !biIsBlank(rest[2])) rec.note = rest[2];
+      if (rest.length > 3 && !biIsBlank(rest[3])) {
+        var sc0 = biParseSuccess(rest[3]);
+        if (sc0 === undefined) rec.warnings.push('Unrecognized success value "' + rest[3] + '" — treated as N/A');
+        else rec.result = sc0;
+      }
+      if (rest.length > 4) rec.warnings.push((rest.length - 4) + ' extra line(s) ignored');
+    } else {
+      var ridx = [];
+      for (var m = 0; m < rest.length; m++) ridx.push(m);
+      while (ridx.length && biIsBlank(rest[ridx[ridx.length - 1]])) ridx.pop();
+      if (ridx.length) {
+        var sl = rest[ridx[ridx.length - 1]];
+        var sct = biParseSuccess(sl);
+        if (sct !== undefined) {
+          rec.result = sct;
+          ridx.pop();
+        }
+      }
+      var noteIdx = [];
+      for (var q = 0; q < ridx.length; q++) {
+        var t = rest[ridx[q]];
+        if (biIsBlank(t)) continue;
+        if (rec.escalatedTo == null && BI_KNOWN_ESCTO.indexOf(t.toLowerCase()) !== -1) {
+          rec.escalatedTo = t;
+          continue;
+        }
+        var flq = biParseFlag(t);
+        if (flq !== undefined && rec.flagMarked == null) {
+          rec.flagMarked = flq;
+          continue;
+        }
+        if ((rec.escalatedTo != null && BI_KNOWN_ESCTO.indexOf(t.toLowerCase()) !== -1) ||
+            (flq !== undefined && rec.flagMarked != null)) {
+          rec.warnings.push('Extra line "' + t + '" kept in note');
+        }
+        noteIdx.push(ridx[q]);
+      }
+      if (noteIdx.length) {
+        // Raw slice across the note span keeps interior blank lines.
+        var rawNb = [];
+        for (var u = pos; u < nb.length; u++) rawNb.push(nb[u]);
+        var a = rawNb[noteIdx[0]], b = rawNb[noteIdx[noteIdx.length - 1]];
+        rec.note = f.slice(a, b + 1).join('\n');
+      }
+    }
+    rec.actions = [];
+    rec.warnings.push('Actions not present in compact row — stored empty');
+    rec.qualId = null;
+    rec.qualUrl = null;
+    return rec;
+  }
+
+  function biAutoParse(text) {
+    var full = biParseFull(text);
+    if (full.length) return { format: 'B', recs: full };
+    var comp = biParseCompact(text);
+    if (comp.length) return { format: 'A', recs: comp };
+    return { format: null, recs: [] };
+  }
+
+  function biDupOf(rec, existing) {
+    for (var j = 0; j < existing.length; j++) {
+      var e = existing[j];
+      if (!e) continue;
+      if (String(e.deviceId || '') !== String(rec.deviceId || '')) continue;
+      if (rec.qualId && e.qualId && String(rec.qualId) !== String(e.qualId)) continue;
+      if (rec.whmcsTicket && e.whmcsTicket && rec.whmcsTicket !== e.whmcsTicket) continue;
+      var rp = String(rec.phase || '').toLowerCase();
+      var ep = String(e.phase || '').toLowerCase();
+      if (rp && ep && rp !== ep) continue;
+      return e;
+    }
+    return null;
+  }
+
+  function biToEntry(rec, usedIds) {
+    var ts = rec.ts || Date.now();
+    var id = ts.toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    while (usedIds[id]) {
+      id = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    }
+    usedIds[id] = true;
+    var e = {
+      id: id,
+      ts: ts, iso: new Date(ts).toISOString(),
+      qualId: rec.qualId || null,
+      qualUrl: rec.qualUrl || null,
+      deviceId: String(rec.deviceId),
+      deviceUrl: rec.deviceUrl || (DDEV + '/backend/devices/' + rec.deviceId + '/summary'),
+      whmcsTicket: rec.whmcsTicket || '',
+      status: rec.status || '',
+      phase: rec.phase || '',
+      actions: rec.actions && rec.actions.length ? rec.actions.slice() : [],
+      open: false
+    };
+    if (rec.escalation) e.escalation = rec.escalation;
+    if (rec.result) e.result = rec.result;
+    if (rec.flagMarked === true || rec.flagMarked === false) e.flagMarked = rec.flagMarked;
+    if (rec.escalatedTo) e.escalatedTo = rec.escalatedTo;
+    if (rec.note) e.note = rec.note;
+    return e;
+  }
+
+  function biShowErr(m) {
+    if (!m) { bErr.style.display = 'none'; bErr.textContent = ''; }
+    else { bErr.style.display = 'block'; bErr.textContent = m; }
+  }
+  function biShowStatus(m, er) {
+    if (!m) { bStatus.style.display = 'none'; bStatus.textContent = ''; bStatus.className = 'fs'; }
+    else { bStatus.style.display = 'block'; bStatus.textContent = m; bStatus.className = 'fs' + (er ? ' er' : ''); }
+  }
+
+  function biRenderPreview(existing) {
+    if (!bParsed.length) {
+      bSummary.textContent = '';
+      bPreview.className = 'bprev';
+      bPreview.innerHTML = '';
+      bImportBtn.disabled = true;
+      return;
+    }
+    var nValid = 0, nBad = 0, nDup = 0;
+    var seen = {};
+    var html = '';
+    for (var i = 0; i < bParsed.length; i++) {
+      var r = bParsed[i];
+      var bad = r.errors.length > 0;
+      var dup = null;
+      if (!bad) {
+        dup = biDupOf(r, existing);
+        var key = String(r.deviceId || '') + '|' + String(r.qualId || '') + '|' + (r.whmcsTicket || '') + '|' + String(r.phase || '').toLowerCase();
+        if (!dup && seen[key]) dup = seen[key];
+        seen[key] = r;
+      }
+      r._dup = !!dup;
+      if (bad) nBad++;
+      else { nValid++; if (dup) nDup++; }
+      var cls = bad ? 'brow bad' : (r.warnings.length || dup ? 'brow wrn' : 'brow');
+      if (dup && !bad) cls += ' dup';
+      html += '<div class="' + cls + '"><b>#' + (i + 1) + '</b> ' +
+        'Qual ' + esc(r.qualId || '-') + ' · Device ' + esc(r.deviceId || '-') +
+        ' · Ticket ' + esc(r.whmcsTicket || '-') + '<br>Phase ' + esc(r.phase || '-') +
+        ' · Status ' + esc(r.status || '-') + ' · Esc ' + esc(r.escalation || '-') +
+        (bad ? '<br><span class="berr">Incomplete: ' + esc(r.errors.join('; ')) + '</span>'
+          : '<br><span class="bok">Valid</span>') +
+        (dup && !bad ? ' <span class="bwarn">· Possible duplicate</span>' : '') +
+        (r.warnings.length ? '<br><span class="bwarn">' + esc(r.warnings.join('; ')) + '</span>' : '') +
+        '</div>';
+    }
+    bSummary.textContent = 'Parsed ' + bParsed.length + ' · Valid ' + nValid + ' · Incomplete ' + nBad + ' · Possible duplicates ' + nDup;
+    bPreview.className = 'bprev show';
+    bPreview.innerHTML = html;
+    bImportBtn.disabled = nValid === 0;
+    bImportBtn.textContent = 'Import Valid Entries' + (nValid ? ' (' + nValid + ')' : '');
+  }
+
+  document.getElementById('b-parse').addEventListener('click', function () {
+    biShowStatus(null);
+    var t = bText.value;
+    if (!t || !t.trim()) {
+      biShowErr('Paste box is empty — nothing to parse.');
+      bParsed = [];
+      biRenderPreview([]);
+      return;
+    }
+    var parsed = biAutoParse(t);
+    if (!parsed.format) {
+      biShowErr('Unsupported format — no "Qual ID:" records or numbered compact rows detected.');
+      bParsed = [];
+      biRenderPreview([]);
+      return;
+    }
+    biShowErr(null);
+    bParsed = parsed.recs;
+    getEntries().then(function (es) { biRenderPreview(es || []); });
+  });
+
+  document.getElementById('b-cancel').addEventListener('click', function () { showView('entries'); });
+  document.getElementById('b-clear').addEventListener('click', function () {
+    bText.value = '';
+    bParsed = [];
+    biShowErr(null);
+    biShowStatus(null);
+    biRenderPreview([]);
+  });
+
+  bImportBtn.addEventListener('click', function () {
+    biShowStatus(null);
+    if (!bParsed.length) return;
+    /* Re-read storage at commit time so entries created meanwhile survive. */
+    getEntries().then(function (es) {
+      var existing = Array.isArray(es) ? es : [];
+      var usedIds = {};
+      for (var k = 0; k < existing.length; k++) if (existing[k] && existing[k].id) usedIds[existing[k].id] = true;
+      var fresh = existing.slice();
+      var nImp = 0, nSkipBad = 0, nSkipDup = 0;
+      var skipDup = bSkipDup.checked;
+      for (var i = 0; i < bParsed.length; i++) {
+        var r = bParsed[i];
+        if (r.errors.length) { nSkipBad++; continue; }
+        if (skipDup && biDupOf(r, fresh)) { nSkipDup++; continue; }
+        fresh.push(biToEntry(r, usedIds));
+        nImp++;
+      }
+      if (!nImp) {
+        biShowStatus('Nothing imported (' + nSkipBad + ' incomplete, ' + nSkipDup + ' duplicates skipped).', true);
+        return;
+      }
+      saveEntries(fresh).then(function () {
+        biShowStatus('Imported ' + nImp + ' entr' + (nImp === 1 ? 'y' : 'ies') +
+          ' (' + nSkipBad + ' incomplete, ' + nSkipDup + ' duplicates skipped).');
+        bParsed = [];
+        bText.value = '';
+        biRenderPreview(fresh);
+        render(fresh);
+      }, function () {
+        biShowStatus('Storage save failed — no entries were imported. Try again.', true);
+      });
+    });
+  });
 
   sGet(TK).then(function (r) { applyTheme(r[TK] || 'dark'); });
   load();

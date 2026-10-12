@@ -197,6 +197,23 @@ label input::placeholder{color:var(--text3)}
 .ff button{flex:1}
 .fs{margin-top:5px;font-size:10px;color:var(--ok);padding:4px 7px;border-radius:var(--rs);background:var(--ok-dim)}
 .fs.er{color:var(--dng);background:var(--dng-dim)}
+
+/* Bulk import */
+.bta{width:100%;min-height:110px;max-height:220px;font:inherit;font-size:11px;color:var(--text);border:1px solid var(--border);border-radius:var(--rs);padding:6px 8px;background:var(--surface2);resize:vertical}
+.bta:focus{border-color:var(--pri);outline:none}
+.bsum{font-size:10px;color:var(--text2);margin:6px 0;line-height:1.5}
+.bprev{max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--rs);margin-bottom:6px;display:none}
+.bprev.show{display:block}
+.brow{padding:5px 8px;border-bottom:1px solid var(--border);font-size:10px;line-height:1.5}
+.brow:last-child{border-bottom:none}
+.brow.bad{background:var(--dng-dim)}
+.brow.wrn{background:var(--wrn-dim)}
+.brow.dup{border-left:3px solid var(--wrn)}
+.bwarn{color:var(--wrn)}
+.berr{color:var(--dng)}
+.bok{color:var(--ok)}
+.bchk{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text2);margin:6px 0}
+.bchk input{accent-color:var(--pri)}
 </style>
 </head>
 <body>
@@ -206,6 +223,7 @@ label input::placeholder{color:var(--text3)}
       <span id="count" class="cnt"></span>
     </div>
     <div class="hdr-r">
+      <button id="bulkBtn" class="add-btn">Parse/Import</button>
       <button id="addEntryBtn" class="add-btn">+ Add Entry</button>
       <button id="themeBtn" class="tbtn" title="Toggle theme"></button>
     </div>
@@ -235,13 +253,32 @@ label input::placeholder{color:var(--text3)}
           <label>Status<select id="f-status"><option value="">--</option><option value="pending">pending</option><option value="InProgress">InProgress</option><option value="Completed">Completed</option><option value="Escalated">Escalated</option><option value="Failed to Start">Failed to Start</option><option value="Failed">Failed</option><option value="Awaiting Rerun">Awaiting Rerun</option><option value="No Disks">No Disks</option></select></label>
           <label>Phase<select id="f-phase"><option value="">--</option><option value="pending">pending</option><option value="Detect Hardware">Detect Hardware</option><option value="Disk Wipe">Disk Wipe</option><option value="Health Check">Health Check</option><option value="HHR">HHR</option></select></label>
         </div>
-        <div class="fr"><label>Actions<input id="f-actions" placeholder="e.g. Confirm BIOS, Confirm Boot Order"></label></div>
+        <div class="fr"><label>Actions<select id="f-actions"><option value="">--</option><option value="Confirm BIOS &amp; Confirm Boot Order">Confirm BIOS &amp; Confirm Boot Order</option><option value="Retry Detect Hardware">Retry Detect Hardware</option><option value="Retry Disk Wipe">Retry Disk Wipe</option><option value="Rerun Detect Hardware (after disk swap)">Rerun Detect Hardware (after disk swap)</option><option value="Retry Health Check">Retry Health Check</option><option value="Trigger Health Check Rerun">Trigger Health Check Rerun</option><option value="Cancel Qualification">Cancel Qualification</option><option value="Dispose">Dispose</option></select></label></div>
         <div class="ff">
           <button id="addBtn" class="bsm pri">+ Add Entry</button>
           <button id="backBtn" class="bsm">Back to Entries</button>
           <button id="clearFieldsBtn" class="bsm dng">Clear Fields</button>
         </div>
         <div id="formStatus" class="fs"></div>
+      </div>
+    </section>
+
+    <section id="panel-bulk" class="pnl" hidden>
+      <div class="fp">
+        <div class="fr"><label>Paste records<textarea id="b-text" class="bta" placeholder="Paste numbered rows or Qual ID: / Device ID: records..."></textarea></label></div>
+        <div class="ff">
+          <button id="b-parse" class="bsm pri">Parse / Preview</button>
+          <button id="b-cancel" class="bsm">Cancel</button>
+        </div>
+        <div id="b-err" class="fs er" style="display:none"></div>
+        <div id="b-summary" class="bsum"></div>
+        <div id="b-preview" class="bprev"></div>
+        <div class="bchk"><input type="checkbox" id="b-skipdup" checked> Skip likely duplicates on import</div>
+        <div class="ff">
+          <button id="b-import" class="bsm pri" disabled>Import Valid Entries</button>
+          <button id="b-clear" class="bsm dng">Clear</button>
+        </div>
+        <div id="b-status" class="fs" style="display:none"></div>
       </div>
     </section>
   </div>
