@@ -635,11 +635,12 @@
     return out;
   }
 
-  /* Format A: numbered compact rows. A seq line is a short number followed by a
-     numeric ID line and a phase line — IDs alone never qualify as seq numbers.
-     Newer rows may carry a leading Ticket ID line (#12345) between the seq
-     number and the Device ID; the note runs from after the flag/escalated-to
-     fields to the final Success line and may span several lines. */
+  /* Format A: numbered compact rows. ID order is Qual ID first, Device ID
+     second; a Ticket ID line ("#...") is explicit or absent, never guessed.
+     Boundaries come from sequence numbers (P3/P2t2 shapes, or P2t continuing
+     the 1,2,3... run) or, without sequence numbers, from Qual ID starts —
+     never from a bare numeric line alone. Markdown (**...**) is stripped
+     per line before any field is interpreted. */
   function biNextNonBlank(lines, i) {
     var nxt = [];
     for (var j = i + 1; j < lines.length && nxt.length < 3; j++) {
@@ -648,83 +649,179 @@
     return nxt;
   }
   function biIsTicketLine(l) { return /^#\S+$/.test(l); }
-  function biIsSeqAt(lines, i) {
-    if (!/^\d+$/.test(lines[i])) return false;
+  /* Compact record starts. A boundary is a pure-numeric line whose followers
+     match a record-opening shape — never a bare number alone:
+       P3   seq, Qual ID, Device ID, phase      (three leading numerics)
+       P2t2 seq, Ticket ID, Device ID, phase
+       P2t  seq, Device ID, phase               (ambiguous: needs run check)
+     Inner IDs fail these shapes (a Device line is followed by a ticket or a
+     phase, never by number+phase), except P2t, which is accepted only when
+     it continues the 1,2,3... run (see biParseCompact). */
+  function biSeqKind(lines, i) {
+    if (!/^\d+$/.test(lines[i])) return null;
     var nxt = biNextNonBlank(lines, i);
-    if (nxt.length < 2) return true;
-    // seq, device, phase (original rows without a ticket line). Device lines
-    // can never match: their followers are a ticket line or a phase line,
-    // never a bare number followed by a phase.
-    if (/^\d+$/.test(nxt[0]) && BI_PHASES.indexOf(nxt[1].toLowerCase()) !== -1) return true;
-    if (nxt.length < 3) return false;
-    // seq, ticket, device, phase
-    if (biIsTicketLine(nxt[0]) && /^\d+$/.test(nxt[1]) && BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return true;
-    // seq, device, ticket, phase
-    if (/^\d+$/.test(nxt[0]) && biIsTicketLine(nxt[1]) && BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return true;
-    // seq, bare-numeric ticket, device, phase
-    if (/^\d+$/.test(nxt[0]) && /^\d+$/.test(nxt[1]) && BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return true;
-    return false;
+    if (nxt.length < 2) return 'tail';
+    if (nxt.length >= 3 && /^\d+$/.test(nxt[0]) && /^\d+$/.test(nxt[1]) &&
+        BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return 'P3';
+    if (nxt.length >= 3 && biIsTicketLine(nxt[0]) && /^\d+$/.test(nxt[1]) &&
+        BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return 'P2t2';
+    if (/^\d+$/.test(nxt[0]) && BI_PHASES.indexOf(nxt[1].toLowerCase()) !== -1) return 'P2t';
+    return null;
+  }
+  /* No-sequence record starts: Qual ID, Device ID, then a ticket line or a
+     phase line (e.g. rows pasted without sequence numbers). */
+  function biQualStartAt(lines, i) {
+    if (!/^\d+$/.test(lines[i])) return false;
+    var nxt = [];
+    for (var j = i + 1; j < lines.length && nxt.length < 3; j++) {
+      if (lines[j] !== '') nxt.push(lines[j]);
+    }
+    if (nxt.length < 2 || !/^\d+$/.test(nxt[0])) return false;
+    if (nxt.length >= 3 && biIsTicketLine(nxt[1])) return true;
+    return BI_PHASES.indexOf(nxt[1].toLowerCase()) !== -1;
+  }
+  /* No-newline blob pastes (Case 7): tokenize via ** markers, letter/digit
+     boundaries and em-dash placeholders. Runs only on inputs with fewer
+     than 3 non-blank lines, so multiline pastes (notes included) are never
+     touched. */
+  function biDeblob(text) {
+    var t = String(text);
+    var parts = t.split(/\r?\n/);
+    var nonBlank = 0;
+    for (var i = 0; i < parts.length; i++) {
+      if (String(parts[i]).replace(/\s+/g, '') !== '') nonBlank++;
+    }
+    if (nonBlank >= 3 || t.indexOf('**') === -1) return t;
+    t = t.replace(/\*\*/g, '\n');
+    t = t.replace(/([A-Za-z\u00c0-\u00ff])(\d)/g, '$1\n$2');
+    t = t.replace(/(\d)([A-Za-z\u00c0-\u00ff])/g, '$1\n$2');
+    return t.replace(/\u2014/g, '\n\u2014\n');
   }
   function biParseCompact(text) {
-    var lines = String(text).split(/\r?\n/).map(function (l) {
+    var lines = biDeblob(text).split(/\r?\n/).map(function (l) {
       return String(l).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
     });
-    var seqAt = [];
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i] !== '' && biIsSeqAt(lines, i)) seqAt.push(i);
+    function nonBlankBefore(idx) {
+      var lead = [];
+      for (var l0 = 0; l0 < idx; l0++) if (lines[l0] !== '') lead.push(lines[l0]);
+      return lead;
     }
-    if (!seqAt.length) return [];
+    function junkRecord(lead) {
+      return { format: 'A', warnings: [], errors: ['Lines before first record start (' + lead.join(' / ') + ') — could not group into a record'] };
+    }
+    // Path 1: numbered records. P2t is ambiguous (an inner ID can share the
+    // shape), so it is accepted only as a small leading number or as the
+    // exact continuation of the 1,2,3... run.
+    var seqAt = [];
+    var expectedNext = null;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i] === '') continue;
+      var kind = biSeqKind(lines, i);
+      if (!kind) continue;
+      var v = parseInt(lines[i], 10);
+      if (kind === 'P3' || kind === 'P2t2') { seqAt.push(i); expectedNext = v + 1; }
+      else if (expectedNext === null) {
+        if (!/^\d{1,3}$/.test(lines[i])) continue;
+        seqAt.push(i); expectedNext = v + 1;
+      } else if (v === expectedNext) { seqAt.push(i); expectedNext++; }
+    }
     var out = [];
-    for (var s = 0; s < seqAt.length; s++) {
-      // Blanks are kept: interior blank lines inside a multiline note survive.
-      var fields = [];
-      var end = s + 1 < seqAt.length ? seqAt[s + 1] : lines.length;
-      for (var j = seqAt[s] + 1; j < end; j++) {
-        fields.push(lines[j]);
+    var s, j, end;
+    if (seqAt.length) {
+      var lead = nonBlankBefore(seqAt[0]);
+      if (lead.length) out.push(junkRecord(lead));
+      for (s = 0; s < seqAt.length; s++) {
+        // Blanks are kept: interior blank lines inside a multiline note survive.
+        var fields = [];
+        end = s + 1 < seqAt.length ? seqAt[s + 1] : lines.length;
+        for (j = seqAt[s] + 1; j < end; j++) {
+          fields.push(lines[j]);
+        }
+        out.push(biParseCompactFields(fields));
       }
-      out.push(biParseCompactFields(fields));
+      return out;
+    }
+    // Path 2: no sequence numbers — split at Qual ID starts.
+    var qAt = [];
+    for (var q = 0; q < lines.length; q++) {
+      if (lines[q] !== '' && biQualStartAt(lines, q)) qAt.push(q);
+    }
+    if (!qAt.length) return [];
+    var qlead = nonBlankBefore(qAt[0]);
+    if (qlead.length) out.push(junkRecord(qlead));
+    for (s = 0; s < qAt.length; s++) {
+      var qfields = [];
+      end = s + 1 < qAt.length ? qAt[s + 1] : lines.length;
+      for (j = qAt[s] + 1; j < end; j++) {
+        qfields.push(lines[j]);
+      }
+      // The Qual ID line itself belongs to the record head.
+      qfields.unshift(lines[qAt[s]]);
+      out.push(biParseCompactFields(qfields));
     }
     return out;
   }
   function biParseCompactFields(f) {
     var rec = { format: 'A', warnings: [], errors: [] };
-    rec.warnings.push('Compact row has no Qual ID — numeric value mapped to Device ID only');
     // Non-blank line index; positional head parsing skips blank separators.
     var nb = [];
     for (var k = 0; k < f.length; k++) if (f[k] !== '') nb.push(k);
     function nth(n) { return n < nb.length ? f[nb[n]] : null; }
     var pos = 0;
     var hasTicket = false;
-    // Optional leading Ticket ID: explicit "#12345", or two leading numerics
-    // ahead of a phase line (original rows never have that shape).
-    var v0 = nth(0), v1 = nth(1), v2 = nth(2);
+    // ID order: Qual ID first, Device ID second. Ticket is explicit ("#...")
+    // or absent — never guessed from a bare number.
+    //   [#ticket, dev, phase...]          ticket-first rows
+    //   [qual, dev, #ticket, phase...]    qual-first rows
+    //   [qual, dev, phase...]             qual/device rows (sequence or not)
+    //   [dev, phase...]                   classic device rows
+    var v0 = nth(0), v1 = nth(1), v2 = nth(2), v3 = nth(3);
+    function isNum(v) { return v != null && /^\d+$/.test(v); }
+    function isPhase(v) { return v != null && BI_PHASES.indexOf(v.toLowerCase()) !== -1; }
+    function setQual(id) {
+      rec.qualId = id;
+      rec.qualUrl = ORIGIN + '/admin/qualification/machinequalification/' + id + '/change/';
+    }
     if (v0 != null && biIsTicketLine(v0)) {
       rec.whmcsTicket = v0;
       pos = 1;
       hasTicket = true;
-    } else if (v0 != null && /^\d+$/.test(v0) && v1 != null && biIsTicketLine(v1) &&
-               v2 != null && BI_PHASES.indexOf(v2.toLowerCase()) !== -1) {
-      // Device-first rows: device, ticket, phase.
-      rec.deviceId = v0;
-      rec.deviceUrl = DDEV + '/backend/devices/' + v0 + '/summary';
-      rec.whmcsTicket = v1;
-      pos = 2;
+      rec.warnings.push('Compact row has no Qual ID — numeric value mapped to Device ID only');
+    } else if (isNum(v0) && isNum(v1) && biIsTicketLine(v2) && isPhase(v3)) {
+      setQual(v0);
+      rec.deviceId = v1;
+      rec.deviceUrl = DDEV + '/backend/devices/' + v1 + '/summary';
+      rec.whmcsTicket = v2;
+      pos = 3;
       hasTicket = true;
-    } else if (v0 != null && /^\d+$/.test(v0) && v1 != null && /^\d+$/.test(v1) &&
-               v2 != null && BI_PHASES.indexOf(v2.toLowerCase()) !== -1) {
-      rec.whmcsTicket = v0;
-      pos = 1;
+    } else if (isNum(v0) && isNum(v1) && biIsTicketLine(v2)) {
+      setQual(v0);
+      rec.deviceId = v1;
+      rec.deviceUrl = DDEV + '/backend/devices/' + v1 + '/summary';
+      rec.whmcsTicket = v2;
+      pos = 3;
       hasTicket = true;
-      rec.warnings.push('First numeric value "' + v0 + '" treated as Ticket ID — verify in preview');
-    } else {
+      rec.errors.push('Phase not found after Ticket ID — record marked ambiguous, skipped on import');
+      rec.actions = [];
+      return rec;
+    } else if (isNum(v0) && isNum(v1) && isPhase(v2)) {
+      setQual(v0);
+      rec.deviceId = v1;
+      rec.deviceUrl = DDEV + '/backend/devices/' + v1 + '/summary';
       rec.whmcsTicket = '';
+      pos = 2;
+      rec.warnings.push('Ticket ID not present in compact row — left blank, not inferred');
+    } else {
+      rec.qualId = null;
+      rec.qualUrl = null;
+      rec.whmcsTicket = '';
+      rec.warnings.push('Compact row has no Qual ID — numeric value mapped to Device ID only');
       rec.warnings.push('Ticket ID not present in compact row — left blank, not inferred');
     }
-    var dv = null;
     if (rec.deviceId == null) {
-      // Device-first rows already set deviceId above; the shared read below
-      // covers classic, ticket-first and bare-ticket rows.
-      dv = nth(pos);
+      // Qual-first and qual/device rows set deviceId above; the shared read
+      // below covers classic and ticket-first rows.
+      var dv = nth(pos);
       pos++;
       if (dv == null || !/^\d+$/.test(dv)) {
         rec.errors.push('Device ID missing or non-numeric' + (dv != null ? ' (found "' + dv + '")' : ''));
@@ -783,6 +880,7 @@
         else rec.result = sc0;
       }
       if (rest.length > 4) rec.warnings.push((rest.length - 4) + ' extra line(s) ignored');
+      if (rest.length < 4) rec.warnings.push('Success Criteria not supplied — left unset');
     } else {
       var ridx = [];
       for (var m = 0; m < rest.length; m++) ridx.push(m);
@@ -825,8 +923,6 @@
     }
     rec.actions = [];
     rec.warnings.push('Actions not present in compact row — stored empty');
-    rec.qualId = null;
-    rec.qualUrl = null;
     return rec;
   }
 
@@ -940,54 +1036,316 @@
   /* Format C: tabular copy headed by "Qual ID Device ID Ticket ID" with one
      whitespace-separated triple per line. Column meaning comes from the
      header, never from position guessing. */
-  function biParseTableRow(line) {
+  /* Format C: tabular copies. Column meaning comes from the header labels,
+     in whatever order they appear; rows are validated per role. Supported
+     columns: Qual ID, Device ID, Ticket ID, Phase/Current phase,
+     Status/Current Status, Escalation Required. */
+  var BI_CROLE_RE = /(current phase|current status|escalation required|qual id|device id|ticket id|phase|status)/g;
+  function biCanonicalRole(label) {
+    if (label === 'qual id') return 'qual';
+    if (label === 'device id') return 'device';
+    if (label === 'ticket id') return 'ticket';
+    if (label === 'phase' || label === 'current phase') return 'phase';
+    if (label === 'status' || label === 'current status') return 'status';
+    return 'esc';
+  }
+  function biHeaderRoles(line) {
+    if (line.indexOf(':') !== -1) return null;
+    var low = ' ' + String(line).toLowerCase() + ' ';
+    var roles = [];
+    var spans = [];
+    var m;
+    BI_CROLE_RE.lastIndex = 0;
+    while ((m = BI_CROLE_RE.exec(low)) !== null) {
+      roles.push(m[1]);
+      spans.push([m.index, m.index + m[1].length]);
+    }
+    if (roles.length < 2) return null;
+    var stripped = low;
+    for (var i = spans.length - 1; i >= 0; i--) {
+      stripped = stripped.slice(0, spans[i][0]) + stripped.slice(spans[i][1]);
+    }
+    if (stripped.replace(/\s+/g, '') !== '') return null;
+    var out = [];
+    for (var j = 0; j < roles.length; j++) out.push(biCanonicalRole(roles[j]));
+    return out;
+  }
+  function biCleanLine(l) {
+    return String(l).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function biParseTableRow(cells, roles) {
     var rec = { format: 'C', warnings: [], errors: [] };
-    var toks = line.split(' ');
-    if (toks.length !== 3) {
-      rec.errors.push('Expected 3 columns "Qual ID Device ID Ticket ID" (found ' + toks.length + ')');
+    if (cells.length !== roles.length) {
+      rec.errors.push('Expected ' + roles.length + ' columns (' + roles.join(' / ') + '), found ' + cells.length + ' — row flagged, not imported');
       return rec;
     }
-    if (!/^\d+$/.test(toks[0])) rec.errors.push('Qual ID not numeric (found "' + toks[0] + '")');
-    else {
-      rec.qualId = toks[0];
-      rec.qualUrl = ORIGIN + '/admin/qualification/machinequalification/' + toks[0] + '/change/';
+    for (var c = 0; c < roles.length; c++) {
+      var role = roles[c], v = cells[c];
+      if (role === 'qual') {
+        if (v === '') rec.warnings.push('Qual ID empty — left unset');
+        else if (!/^\d+$/.test(v)) rec.errors.push('Qual ID not numeric (found "' + v + '")');
+        else {
+          rec.qualId = v;
+          rec.qualUrl = ORIGIN + '/admin/qualification/machinequalification/' + v + '/change/';
+        }
+      } else if (role === 'device') {
+        if (v === '') rec.errors.push('Device ID empty — record incomplete, skipped on import');
+        else if (!/^\d+$/.test(v)) rec.errors.push('Device ID not numeric (found "' + v + '")');
+        else {
+          rec.deviceId = v;
+          rec.deviceUrl = DDEV + '/backend/devices/' + v + '/summary';
+        }
+      } else if (role === 'ticket') {
+        if (v === '') {
+          rec.whmcsTicket = '';
+          rec.warnings.push('Ticket ID missing — left blank, not inferred');
+        } else if (!/\d/.test(v)) rec.errors.push('Ticket ID has no digits (found "' + v + '")');
+        else rec.whmcsTicket = v;
+      } else if (role === 'phase') {
+        if (v === '') {
+          rec.phase = '';
+          rec.warnings.push('Phase missing');
+        } else {
+          rec.phase = v;
+          if (BI_PHASES.indexOf(v.toLowerCase()) === -1) rec.warnings.push('Unknown phase "' + v + '" — kept as-is');
+        }
+      } else if (role === 'status') {
+        if (v === '') {
+          rec.status = '';
+          rec.warnings.push('Status missing');
+        } else {
+          rec.status = v;
+          if (BI_KNOWN_STATUS_N.indexOf(biNorm(v)) === -1) rec.warnings.push('Unknown status "' + v + '" — kept as-is');
+        }
+      } else {
+        if (v !== '' && !biIsBlank(v)) {
+          var ev = biParseEsc(v);
+          if (ev === undefined) rec.warnings.push('Unrecognized escalation "' + v + '" — treated as unknown');
+          else rec.escalation = ev;
+        }
+      }
     }
-    if (!/^\d+$/.test(toks[1])) rec.errors.push('Device ID not numeric (found "' + toks[1] + '")');
-    else {
-      rec.deviceId = toks[1];
-      rec.deviceUrl = DDEV + '/backend/devices/' + toks[1] + '/summary';
-    }
-    if (!/\d/.test(toks[2])) rec.errors.push('Ticket ID has no digits (found "' + toks[2] + '")');
-    else rec.whmcsTicket = toks[2];
     if (rec.errors.length) return rec;
-    rec.phase = '';
-    rec.status = '';
-    rec.escalation = null;
+    if (rec.qualId == null) { rec.qualUrl = null; }
+    if (rec.whmcsTicket == null) {
+      rec.whmcsTicket = '';
+      rec.warnings.push('Ticket ID not present in table — left blank, not inferred');
+    }
+    if (rec.phase == null) rec.phase = '';
+    if (rec.status == null) rec.status = '';
+    if (rec.escalation == null) rec.escalation = null;
+    var hasPSS = false;
+    for (var k = 0; k < roles.length; k++) {
+      if (roles[k] === 'phase' || roles[k] === 'status' || roles[k] === 'esc') { hasPSS = true; break; }
+    }
+    if (!hasPSS) rec.warnings.push('Phase/Status/Escalation not in table — left blank, filled as Auto at Hashroot');
+    if (!rolesContainTicket(roles)) rec.warnings.push('Ticket ID not present in table — left blank, not inferred');
     rec.actions = [];
-    rec.warnings.push('Phase/Status/Escalation not in table — left blank, filled as Auto at Hashroot');
     rec.warnings.push('Actions not present in table — stored empty');
     return rec;
   }
+  function rolesContainTicket(roles) {
+    for (var i = 0; i < roles.length; i++) if (roles[i] === 'ticket') return true;
+    return false;
+  }
   function biParseTable(text) {
-    var lines = String(text).split(/\r?\n/).map(function (l) {
-      return String(l).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
-    });
-    var head = -1;
-    for (var i = 0; i < lines.length; i++) {
-      if (/^\s*qual\s*id\s+device\s*id\s+ticket\s*id/i.test(lines[i])) { head = i; break; }
+    var rawLines = String(text).split(/\r?\n/);
+    var head = -1, roles = null, tabbed = false;
+    for (var i = 0; i < rawLines.length; i++) {
+      var hc = biCleanLine(rawLines[i]);
+      if (!hc) continue;
+      var r = biHeaderRoles(hc);
+      if (r) {
+        head = i;
+        roles = r;
+        tabbed = rawLines[i].indexOf('\t') !== -1;
+        break;
+      }
     }
     if (head < 0) return null;
     var out = [];
-    for (var j = head + 1; j < lines.length; j++) {
-      if (lines[j] === '') continue;
-      out.push(biParseTableRow(lines[j]));
+    for (var j = head + 1; j < rawLines.length; j++) {
+      var cells;
+      if (tabbed && rawLines[j].indexOf('\t') !== -1) {
+        cells = String(rawLines[j]).split('\t').map(biCleanLine);
+        var allEmpty = true;
+        for (var e = 0; e < cells.length; e++) if (cells[e] !== '') { allEmpty = false; break; }
+        if (allEmpty) continue;
+      } else {
+        var cl = biCleanLine(rawLines[j]);
+        if (!cl) continue;
+        cells = cl.split(' ');
+      }
+      out.push(biParseTableRow(cells, roles));
     }
+    return out;
+  }
+
+  /* Format L: Markdown-link records. A [label](url) line carries both the ID
+     (label) and its source URL; the URL path decides Qual vs Device. Later
+     plain lines in the chunk give ticket, phase, status, escalation; any
+     remaining lines go through the shared tail classifier. */
+  var BI_LINK_RE = /\[([^\]]*)\]\(([^)]+)\)/;
+  function biLinkKind(url) {
+    if (/\/admin\/qualification\/machinequalification\//.test(url)) return 'qual';
+    if (/\/backend\/devices\//.test(url)) return 'device';
+    return null;
+  }
+  function biLinkId(label, url, rec, what) {
+    if (/^\d+$/.test(label)) return label;
+    var m = String(url).match(/(\d+)(?!.*\d)/);
+    rec.warnings.push(what + ' link label "' + label + '" not numeric — ID taken from URL, verify in preview');
+    return m ? m[1] : null;
+  }
+  /* Shared tail classifier for ticket-anchored rows (links chunks): trailing
+     Success line, then Escalated-To / flag slots in any order; every other
+     line is note content with interior blanks preserved. */
+  function biClassifyTail(raw, rec) {
+    var nb = [];
+    for (var k = 0; k < raw.length; k++) if (raw[k] !== '') nb.push(k);
+    rec.result = null;
+    var idx = [];
+    for (var m = 0; m < nb.length; m++) idx.push(m);
+    while (idx.length && biIsBlank(raw[nb[idx[idx.length - 1]]])) idx.pop();
+    if (idx.length) {
+      var sc = biParseSuccess(raw[nb[idx[idx.length - 1]]]);
+      if (sc !== undefined) { rec.result = sc; idx.pop(); }
+    }
+    var noteIdx = [];
+    for (var q = 0; q < idx.length; q++) {
+      var t = raw[nb[idx[q]]];
+      if (biIsBlank(t)) continue;
+      if (rec.escalatedTo == null && BI_KNOWN_ESCTO.indexOf(t.toLowerCase()) !== -1) {
+        rec.escalatedTo = t;
+        continue;
+      }
+      var fl = biParseFlag(t);
+      if (fl !== undefined && rec.flagMarked == null) {
+        rec.flagMarked = fl;
+        continue;
+      }
+      if ((rec.escalatedTo != null && BI_KNOWN_ESCTO.indexOf(t.toLowerCase()) !== -1) ||
+          (fl !== undefined && rec.flagMarked != null)) {
+        rec.warnings.push('Extra line "' + t + '" kept in note');
+      }
+      noteIdx.push(idx[q]);
+    }
+    if (noteIdx.length) {
+      var a = nb[noteIdx[0]], b = nb[noteIdx[noteIdx.length - 1]];
+      rec.note = raw.slice(a, b + 1).join('\n');
+      rec.warnings.push('Note captured (' + noteIdx.length + ' line(s)) — verify in preview');
+    }
+  }
+  function biParseLinkChunk(raw) {
+    var rec = { format: 'L', warnings: [], errors: [] };
+    var quals = [], devs = [], rest = [];
+    for (var i = 0; i < raw.length; i++) {
+      if (raw[i] === '') continue;
+      var lm = raw[i].match(BI_LINK_RE);
+      var kind = lm ? biLinkKind(lm[2]) : null;
+      if (kind === 'qual') quals.push({ label: biStripMd(lm[1]), url: lm[2] });
+      else if (kind === 'device') devs.push({ label: biStripMd(lm[1]), url: lm[2] });
+      else rest.push(raw[i]);
+    }
+    if (!quals.length) rec.warnings.push('Qual ID missing — left unset, not inferred');
+    else {
+      var qid = biLinkId(quals[0].label, quals[0].url, rec, 'Qual');
+      if (!qid) rec.errors.push('Qual ID not found in link or URL');
+      else { rec.qualId = qid; rec.qualUrl = quals[0].url; }
+      for (var q = 1; q < quals.length; q++) rec.warnings.push('Extra Qual link ignored');
+    }
+    if (!devs.length) {
+      rec.errors.push('Device ID not found — record incomplete, skipped on import');
+    } else {
+      var did = biLinkId(devs[0].label, devs[0].url, rec, 'Device');
+      if (!did) rec.errors.push('Device ID not found — record incomplete, skipped on import');
+      else { rec.deviceId = did; rec.deviceUrl = devs[0].url; }
+      for (var d = 1; d < devs.length; d++) rec.warnings.push('Extra Device link ignored');
+    }
+    var rpos = 0;
+    function peek() { return rpos < rest.length ? rest[rpos] : null; }
+    function next() { return rpos < rest.length ? rest[rpos++] : null; }
+    var tickSeen = 0;
+    while (peek() != null && biIsTicketLine(peek())) {
+      if (!tickSeen) rec.whmcsTicket = next();
+      else { next(); rec.warnings.push('Multiple Ticket ID lines — first kept'); }
+      tickSeen++;
+    }
+    if (!tickSeen) {
+      rec.whmcsTicket = '';
+      rec.warnings.push('Ticket ID missing — left blank, not inferred');
+    }
+    var ph = peek();
+    if (ph != null && BI_PHASES.indexOf(ph.toLowerCase()) !== -1) { rec.phase = next(); }
+    else {
+      rec.phase = '';
+      rec.warnings.push('Phase missing');
+    }
+    var sl = peek();
+    if (sl != null && !biIsBlank(sl) && BI_KNOWN_STATUS_N.indexOf(biNorm(sl)) !== -1) {
+      rec.status = next();
+    } else if (sl != null && !biIsBlank(sl) && biParseEsc(sl) !== undefined) {
+      rec.status = '';
+      rec.warnings.push('Status missing');
+    } else {
+      var sv = next();
+      rec.status = sv || '';
+      if (sv == null) rec.warnings.push('Status missing');
+      else if (!biIsBlank(sv)) rec.warnings.push('Unknown status "' + sv + '" — kept as-is');
+    }
+    var el = peek();
+    if (el != null && !biIsBlank(el) && biParseEsc(el) !== undefined) {
+      next();
+      rec.escalation = biParseEsc(el);
+    } else rec.escalation = null;
+    var tail = [];
+    while (peek() != null) tail.push(next());
+    biClassifyTail(tail, rec);
+    rec.actions = [];
+    rec.warnings.push('Actions not present in record — stored empty');
+    return rec;
+  }
+  function biParseLinks(text) {
+    var lines = String(text).split(/\r?\n/).map(function (l) {
+      return String(l).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+    });
+    var has = false;
+    for (var i = 0; i < lines.length; i++) {
+      var lm = lines[i].match(BI_LINK_RE);
+      if (lm && biLinkKind(lm[2])) { has = true; break; }
+    }
+    if (!has) return null;
+    // Split records at Qual links; a Device link starts a record only when
+    // the open chunk already holds one (mid-record device lines stay put).
+    var chunks = [];
+    var cur = [];
+    var curHasDev = false;
+    function pushCur() {
+      var any = false;
+      for (var k = 0; k < cur.length; k++) if (cur[k] !== '') { any = true; break; }
+      if (any) chunks.push(cur);
+      cur = [];
+      curHasDev = false;
+    }
+    for (var j = 0; j < lines.length; j++) {
+      var m2 = lines[j].match(BI_LINK_RE);
+      var kd = m2 ? biLinkKind(m2[2]) : null;
+      if (kd === 'qual' && cur.length) pushCur();
+      else if (kd === 'device' && curHasDev) pushCur();
+      if (kd === 'device') curHasDev = true;
+      cur.push(lines[j]);
+    }
+    pushCur();
+    var out = [];
+    for (var c = 0; c < chunks.length; c++) out.push(biParseLinkChunk(chunks[c]));
     return out;
   }
 
   function biAutoParse(text) {
     var full = biParseFull(text);
     if (full.length) return { format: 'B', recs: full };
+    var links = biParseLinks(text);
+    if (links) return { format: 'L', recs: links };
     var tab = biParseTable(text);
     if (tab) return { format: 'C', recs: tab };
     var tsv = biParseD(text);
@@ -1103,7 +1461,7 @@
     }
     var parsed = biAutoParse(t);
     if (!parsed.format) {
-      biShowErr('Unsupported format — no "Qual ID:" records, table header, or numbered compact rows detected.');
+      biShowErr('Unsupported format — no "Qual ID:" records, links, table header, or numbered compact rows detected.');
       bParsed = [];
       biRenderPreview([]);
       return;
