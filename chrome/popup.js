@@ -475,8 +475,10 @@
 
   var BI_PHASES = ['pending', 'detect hardware', 'disk wipe', 'health check', 'hhr'];
   var BI_KNOWN_STATUS = ['pending', 'inprogress', 'completed', 'escalated', 'failed to start', 'failed', 'awaiting rerun', 'no disks', 'blocked'];
-  var BI_KNOWN_STATUS_N = BI_KNOWN_STATUS.map(biNorm);
   var BI_KNOWN_ESCTO = ['no escalation', 'midhun', 'shift manager', 'onsite'];
+  var BI_KNOWN_STATUS_N = BI_KNOWN_STATUS.map(biNorm);
+  var BI_PHASES_N = BI_PHASES.map(biNorm);
+  var BI_ESCTO_N = BI_KNOWN_ESCTO.map(biNorm);
 
   function biParseEsc(v) {
     if (v == null) return null;
@@ -647,14 +649,18 @@
   }
   function biIsTicketLine(l) { return /^#\S+$/.test(l); }
   function biIsSeqAt(lines, i) {
-    if (!/^\d{1,3}$/.test(lines[i])) return false;
+    if (!/^\d+$/.test(lines[i])) return false;
     var nxt = biNextNonBlank(lines, i);
     if (nxt.length < 2) return true;
-    // seq, device, phase (original rows without a ticket line)
+    // seq, device, phase (original rows without a ticket line). Device lines
+    // can never match: their followers are a ticket line or a phase line,
+    // never a bare number followed by a phase.
     if (/^\d+$/.test(nxt[0]) && BI_PHASES.indexOf(nxt[1].toLowerCase()) !== -1) return true;
     if (nxt.length < 3) return false;
     // seq, ticket, device, phase
     if (biIsTicketLine(nxt[0]) && /^\d+$/.test(nxt[1]) && BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return true;
+    // seq, device, ticket, phase
+    if (/^\d+$/.test(nxt[0]) && biIsTicketLine(nxt[1]) && BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return true;
     // seq, bare-numeric ticket, device, phase
     if (/^\d+$/.test(nxt[0]) && /^\d+$/.test(nxt[1]) && BI_PHASES.indexOf(nxt[2].toLowerCase()) !== -1) return true;
     return false;
@@ -696,6 +702,14 @@
       rec.whmcsTicket = v0;
       pos = 1;
       hasTicket = true;
+    } else if (v0 != null && /^\d+$/.test(v0) && v1 != null && biIsTicketLine(v1) &&
+               v2 != null && BI_PHASES.indexOf(v2.toLowerCase()) !== -1) {
+      // Device-first rows: device, ticket, phase.
+      rec.deviceId = v0;
+      rec.deviceUrl = DDEV + '/backend/devices/' + v0 + '/summary';
+      rec.whmcsTicket = v1;
+      pos = 2;
+      hasTicket = true;
     } else if (v0 != null && /^\d+$/.test(v0) && v1 != null && /^\d+$/.test(v1) &&
                v2 != null && BI_PHASES.indexOf(v2.toLowerCase()) !== -1) {
       rec.whmcsTicket = v0;
@@ -706,13 +720,18 @@
       rec.whmcsTicket = '';
       rec.warnings.push('Ticket ID not present in compact row — left blank, not inferred');
     }
-    var dv = nth(pos);
-    pos++;
-    if (dv == null || !/^\d+$/.test(dv)) {
-      rec.errors.push('Device ID missing or non-numeric' + (dv != null ? ' (found "' + dv + '")' : ''));
-    } else {
-      rec.deviceId = dv;
-      rec.deviceUrl = DDEV + '/backend/devices/' + dv + '/summary';
+    var dv = null;
+    if (rec.deviceId == null) {
+      // Device-first rows already set deviceId above; the shared read below
+      // covers classic, ticket-first and bare-ticket rows.
+      dv = nth(pos);
+      pos++;
+      if (dv == null || !/^\d+$/.test(dv)) {
+        rec.errors.push('Device ID missing or non-numeric' + (dv != null ? ' (found "' + dv + '")' : ''));
+      } else {
+        rec.deviceId = dv;
+        rec.deviceUrl = DDEV + '/backend/devices/' + dv + '/summary';
+      }
     }
     var ph = nth(pos);
     pos++;
@@ -720,10 +739,18 @@
     if (ph == null) rec.warnings.push('Phase missing');
     else if (BI_PHASES.indexOf(ph.toLowerCase()) === -1) rec.warnings.push('Unknown phase "' + ph + '" — kept as-is');
     var st = nth(pos);
-    pos++;
-    rec.status = st || '';
-    if (st == null) rec.warnings.push('Status missing');
-    else if (BI_KNOWN_STATUS_N.indexOf(biNorm(st)) === -1) rec.warnings.push('Unknown status "' + st + '" — kept as-is');
+    if (st != null && !biIsBlank(st) && biParseEsc(st) !== undefined &&
+        BI_KNOWN_STATUS_N.indexOf(biNorm(st)) === -1) {
+      // A Yes/No value in the status slot means status is absent and this
+      // line is the Escalation value — leave pos so esc parsing takes it.
+      rec.status = '';
+      rec.warnings.push('Status missing');
+    } else {
+      pos++;
+      rec.status = st || '';
+      if (st == null) rec.warnings.push('Status missing');
+      else if (!biIsBlank(st) && BI_KNOWN_STATUS_N.indexOf(biNorm(st)) === -1) rec.warnings.push('Unknown status "' + st + '" — kept as-is');
+    }
     var escline = nth(pos);
     pos++;
     if (escline != null && !biIsBlank(escline)) {
@@ -793,6 +820,7 @@
         for (var u = pos; u < nb.length; u++) rawNb.push(nb[u]);
         var a = rawNb[noteIdx[0]], b = rawNb[noteIdx[noteIdx.length - 1]];
         rec.note = f.slice(a, b + 1).join('\n');
+        rec.warnings.push('Note captured (' + noteIdx.length + ' line(s)) — verify in preview');
       }
     }
     rec.actions = [];
@@ -802,9 +830,168 @@
     return rec;
   }
 
+  /* Format D: single-line tab/space-separated rows:
+     seq device phase status esc flag escTo [note] success. Multi-word values
+     (Detect Hardware, Failed to Start, Shift Manager) are matched greedily
+     against the known vocabularies; the note is whatever words remain. */
+  function biLongestMatch(toks, i, normList, maxWords) {
+    for (var w = maxWords; w >= 1; w--) {
+      if (i + w - 1 >= toks.length) continue;
+      var raw = toks.slice(i, i + w).join(' ');
+      if (normList.indexOf(biNorm(raw)) !== -1) return { text: raw, next: i + w };
+    }
+    return null;
+  }
+  function biIsDLine(toks) {
+    if (toks.length < 8) return false;
+    if (!/^\d+$/.test(toks[0]) || !/^\d+$/.test(toks[1])) return false;
+    return biLongestMatch(toks, 2, BI_PHASES_N, 2) !== null;
+  }
+  function biParseDRow(toks) {
+    var rec = { format: 'D', warnings: [], errors: [] };
+    rec.warnings.push('Row has no Qual ID — numeric value mapped to Device ID only');
+    var i = 1;
+    rec.deviceId = toks[1];
+    rec.deviceUrl = DDEV + '/backend/devices/' + toks[1] + '/summary';
+    i = 2;
+    var pm = biLongestMatch(toks, i, BI_PHASES_N, 2);
+    if (!pm) {
+      rec.phase = toks[i] || '';
+      rec.warnings.push('Unknown phase "' + toks[i] + '" — kept as-is');
+      i++;
+    } else { rec.phase = pm.text; i = pm.next; }
+    var sm = i < toks.length ? biLongestMatch(toks, i, BI_KNOWN_STATUS_N, 3) : null;
+    if (sm) { rec.status = sm.text; i = sm.next; }
+    else if (i < toks.length && !biIsBlank(toks[i]) && biParseEsc(toks[i]) !== undefined) {
+      rec.status = '';
+      rec.warnings.push('Status missing');
+    } else {
+      var sv = i < toks.length ? toks[i] : null;
+      rec.status = sv || '';
+      if (sv == null) rec.warnings.push('Status missing');
+      else if (!biIsBlank(sv)) rec.warnings.push('Unknown status "' + sv + '" — kept as-is');
+      i++;
+    }
+    if (i < toks.length && !biIsBlank(toks[i])) {
+      var ev = biParseEsc(toks[i]);
+      if (ev === undefined) { rec.escalation = null; rec.warnings.push('Unrecognized escalation "' + toks[i] + '" — treated as unknown'); }
+      else rec.escalation = ev;
+    } else rec.escalation = null;
+    if (i < toks.length) i++;
+    if (i < toks.length && !biIsBlank(toks[i])) {
+      var fv = biParseFlag(toks[i]);
+      if (fv === undefined) rec.warnings.push('Unrecognized flag value "' + toks[i] + '" — left unset');
+      else rec.flagMarked = fv;
+    }
+    if (i < toks.length) i++;
+    var em = i < toks.length ? biLongestMatch(toks, i, BI_ESCTO_N, 2) : null;
+    if (em) { rec.escalatedTo = em.text; i = em.next; }
+    else if (i < toks.length && !biIsBlank(toks[i])) {
+      rec.escalatedTo = toks[i];
+      rec.warnings.push('Unknown Escalated To "' + toks[i] + '" — kept as-is');
+      i++;
+    } else if (i < toks.length) i++;
+    var tail = toks.slice(i);
+    while (tail.length && biIsBlank(tail[tail.length - 1])) tail.pop();
+    rec.result = null;
+    if (tail.length) {
+      var sc = biParseSuccess(tail[tail.length - 1]);
+      if (sc !== undefined) { rec.result = sc; tail.pop(); }
+    }
+    var nt = [];
+    for (var q = 0; q < tail.length; q++) if (!biIsBlank(tail[q])) nt.push(tail[q]);
+    if (nt.length) {
+      rec.note = nt.join(' ');
+      rec.warnings.push('Note captured — verify in preview');
+    }
+    rec.actions = [];
+    rec.warnings.push('Actions not present in row — stored empty');
+    rec.whmcsTicket = '';
+    rec.warnings.push('Ticket ID not present in row — left blank, not inferred');
+    rec.qualId = null;
+    rec.qualUrl = null;
+    return rec;
+  }
+  function biParseD(text) {
+    var rows = [];
+    var lines = String(text).split(/\r?\n/);
+    for (var l = 0; l < lines.length; l++) {
+      var clean = String(lines[l]).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+      if (!clean) continue;
+      rows.push(clean.split(' '));
+    }
+    var any = false;
+    for (var k = 0; k < rows.length; k++) {
+      if (biIsDLine(rows[k])) { any = true; break; }
+    }
+    if (!any) return null;
+    var out = [];
+    for (var j = 0; j < rows.length; j++) {
+      if (biIsDLine(rows[j])) out.push(biParseDRow(rows[j]));
+      else {
+        var bad = { format: 'D', warnings: [], errors: [] };
+        bad.errors.push('Not a table row: expected "seq device phase status esc flag escTo [note] success"');
+        out.push(bad);
+      }
+    }
+    return out;
+  }
+
+  /* Format C: tabular copy headed by "Qual ID Device ID Ticket ID" with one
+     whitespace-separated triple per line. Column meaning comes from the
+     header, never from position guessing. */
+  function biParseTableRow(line) {
+    var rec = { format: 'C', warnings: [], errors: [] };
+    var toks = line.split(' ');
+    if (toks.length !== 3) {
+      rec.errors.push('Expected 3 columns "Qual ID Device ID Ticket ID" (found ' + toks.length + ')');
+      return rec;
+    }
+    if (!/^\d+$/.test(toks[0])) rec.errors.push('Qual ID not numeric (found "' + toks[0] + '")');
+    else {
+      rec.qualId = toks[0];
+      rec.qualUrl = ORIGIN + '/admin/qualification/machinequalification/' + toks[0] + '/change/';
+    }
+    if (!/^\d+$/.test(toks[1])) rec.errors.push('Device ID not numeric (found "' + toks[1] + '")');
+    else {
+      rec.deviceId = toks[1];
+      rec.deviceUrl = DDEV + '/backend/devices/' + toks[1] + '/summary';
+    }
+    if (!/\d/.test(toks[2])) rec.errors.push('Ticket ID has no digits (found "' + toks[2] + '")');
+    else rec.whmcsTicket = toks[2];
+    if (rec.errors.length) return rec;
+    rec.phase = '';
+    rec.status = '';
+    rec.escalation = null;
+    rec.actions = [];
+    rec.warnings.push('Phase/Status/Escalation not in table — left blank, filled as Auto at Hashroot');
+    rec.warnings.push('Actions not present in table — stored empty');
+    return rec;
+  }
+  function biParseTable(text) {
+    var lines = String(text).split(/\r?\n/).map(function (l) {
+      return String(l).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+    });
+    var head = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (/^\s*qual\s*id\s+device\s*id\s+ticket\s*id/i.test(lines[i])) { head = i; break; }
+    }
+    if (head < 0) return null;
+    var out = [];
+    for (var j = head + 1; j < lines.length; j++) {
+      if (lines[j] === '') continue;
+      out.push(biParseTableRow(lines[j]));
+    }
+    return out;
+  }
+
   function biAutoParse(text) {
     var full = biParseFull(text);
     if (full.length) return { format: 'B', recs: full };
+    var tab = biParseTable(text);
+    if (tab) return { format: 'C', recs: tab };
+    var tsv = biParseD(text);
+    if (tsv) return { format: 'D', recs: tsv };
     var comp = biParseCompact(text);
     if (comp.length) return { format: 'A', recs: comp };
     return { format: null, recs: [] };
@@ -916,7 +1103,13 @@
     }
     var parsed = biAutoParse(t);
     if (!parsed.format) {
-      biShowErr('Unsupported format — no "Qual ID:" records or numbered compact rows detected.');
+      biShowErr('Unsupported format — no "Qual ID:" records, table header, or numbered compact rows detected.');
+      bParsed = [];
+      biRenderPreview([]);
+      return;
+    }
+    if (!parsed.recs.length) {
+      biShowErr('Table header found but no data rows detected.');
       bParsed = [];
       biRenderPreview([]);
       return;
